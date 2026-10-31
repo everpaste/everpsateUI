@@ -1,0 +1,530 @@
+--[[
+    Neverlose UI для Roblox — демо-скрипт.
+
+    Этот файл показывает ВСЁ, что умеет библиотека: окно, вкладки, подвкладки,
+    секции, все виды элементов, плашки «...» с доп. настройками, аккордеоны,
+    подсказки, бинды, вотермарку, превью игроков (Players) и экран снаряжения
+    (Inventory). Скопируй нужные куски в свой скрипт.
+
+    Порядок работы:
+      1. Загрузить библиотеку (блок «ЗАГРУЗКА» ниже).
+      2. Library:AddWindow(...) — создать окно.
+      3. Win:AddTab(...) / Tab:AddSubTab(...) — вкладки.
+      4. Tab:AddSection(...) — секции (карточки) в левой или правой колонке.
+      5. Section:AddToggle / AddSlider / AddDropdown ... — элементы.
+      Каждый элемент вызывает свой callback при изменении и умеет :Set() / :Get().
+
+    Управление в игре:
+      RShift              — открыть / закрыть меню.
+      Колесико или ПКМ    — на любой функции: меню хоткеев (All Hotkeys / New Hotkey / Reset).
+      ПКМ по вотермарке   — настройки вотермарки (Items, цвет, аватар, позиция).
+      ЛКМ + тянуть        — вотермарку, Hotkeys и Spectators можно двигать (пока меню открыто).
+      Иконка дискеты      — сохранить текущий пресет (конфиг).
+]]
+
+-- =========================================================================
+-- ЗАГРУЗКА
+-- =========================================================================
+-- Библиотека — один файл scr.lua. Здесь он скачивается с GitHub. Перед
+-- loadstring из исходника вырезаются комментарии и отступы: очень большой
+-- исходник некоторые экзекуторы отказываются компилировать.
+
+local LIBRARY_FILE = "scr.lua"
+local LIBRARY_URL = "https://raw.githubusercontent.com/whotner/nl-menu-rb/main/scr.lua"
+
+local function stripComments(src)
+    local out, i, n = {}, 1, #src
+    while i <= n do
+        local c = src:sub(i, i)
+        local two = src:sub(i, i + 1)
+        if two == "--" then
+            -- длинный комментарий --[[ ... ]] / --[=[ ... ]=]
+            local eq = src:match("^%-%-%[(=*)%[", i)
+            if eq then
+                local close = "]" .. eq .. "]"
+                local stop = src:find(close, i, true)
+                i = stop and (stop + #close) or (n + 1)
+            else
+                local nl = src:find("\n", i, true)
+                i = nl or (n + 1)
+            end
+        elseif c == '"' or c == "'" then
+            -- строки копируются как есть
+            local quote = c
+            local start = i
+            i = i + 1
+            while i <= n do
+                local ch = src:sub(i, i)
+                if ch == "\\" then
+                    i = i + 2
+                elseif ch == quote then
+                    i = i + 1
+                    break
+                elseif ch == "\n" then
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            out[#out + 1] = src:sub(start, i - 1)
+        elseif c == "[" then
+            -- длинные строки [[...]], [=[...]=] — тоже как есть
+            local eq = src:match("^%[(=*)%[", i)
+            if eq then
+                local closeToken = "]" .. eq .. "]"
+                local contentStart = i + #eq + 2
+                local closeStart = src:find(closeToken, contentStart, true)
+                local stop = closeStart and (closeStart + #closeToken - 1) or n
+                out[#out + 1] = src:sub(i, stop)
+                i = stop + 1
+            else
+                local nl = src:find("\n", i, true)
+                local stop = nl and (nl - 1) or n
+                local line = src:sub(i, stop)
+                local trimmed = line:match("^[ \t]*(.-)[ \t]*$")
+                if trimmed ~= "" then out[#out + 1] = trimmed end
+                if nl then
+                    out[#out + 1] = "\n"
+                    i = nl + 1
+                else
+                    i = n + 1
+                end
+            end
+        else
+            local nl = src:find("\n", i, true)
+            local stop = nl and (nl - 1) or n
+            local line = src:sub(i, stop)
+            local trimmed = line:match("^[ \t]*(.-)[ \t]*$")
+            if trimmed ~= "" then out[#out + 1] = trimmed end
+            if nl then
+                out[#out + 1] = "\n"
+                i = nl + 1
+            else
+                i = n + 1
+            end
+        end
+    end
+    return table.concat(out)
+end
+
+local function loadLibrary(src, origin)
+    local fn, err = loadstring(stripComments(src), origin)
+    if not fn then error(origin .. ": compile failed: " .. tostring(err)) end
+    local lib = fn()
+    if type(lib) ~= "table" or type(lib.AddWindow) ~= "function" then
+        error(origin .. ": did not return the library")
+    end
+    return lib
+end
+
+-- true = брать scr.lua из папки workspace экзекутора, а не с GitHub
+-- (удобно, если правишь библиотеку сам).
+local USE_LOCAL_FILE = false
+
+-- GitHub кэширует ссылку на "main" несколько минут. Поэтому сначала узнаём
+-- хэш последнего коммита и качаем файл по нему — всегда самая свежая версия.
+local function latestLibraryUrl()
+    local ok, body = pcall(function()
+        return game:HttpGet("https://api.github.com/repos/whotner/nl-menu-rb/commits/main")
+    end)
+    local sha = ok and type(body) == "string" and body:match('"sha"%s*:%s*"(%x+)"')
+    if sha then
+        return "https://raw.githubusercontent.com/whotner/nl-menu-rb/" .. sha .. "/scr.lua"
+    end
+    return LIBRARY_URL .. "?v=" .. tostring(os.time())
+end
+
+local Library
+if USE_LOCAL_FILE and type(readfile) == "function" and type(isfile) == "function" and isfile(LIBRARY_FILE) then
+    Library = loadLibrary(readfile(LIBRARY_FILE), LIBRARY_FILE)
+else
+    local url = latestLibraryUrl()
+    print("[nl-menu] loading " .. url)
+    Library = loadLibrary(game:HttpGet(url), url)
+end
+
+-- =========================================================================
+-- НАСТРОЙКИ ДО СОЗДАНИЯ ОКНА
+-- =========================================================================
+-- Сколько дней подписки показать в профиле. nil = "Lifetime".
+Library.DaysLeft = 29
+-- Library.ShowLoader = false -- выключить плашку загрузки (по умолчанию включена)
+
+-- =========================================================================
+-- ОКНО
+-- =========================================================================
+-- AddWindow(название, картинка-лого, подпись под названием).
+-- Картинка: "" или nil = нарисованное "NL"; иначе "rbxassetid://..." и т.п.
+local Win = Library:AddWindow(
+    "Neverlose",
+    "",
+    "BloxStrike"
+)
+-- Масштаб меню: "Auto" (по размеру экрана) или число, например 0.9.
+Win:SetScale("Auto")
+
+-- Заголовок группы вкладок в левой колонке ("AIMBOT", "COMMON").
+Win:AddTabLabel("Aimbot")
+
+-- =========================================================================
+-- ВКЛАДКА RAGE — основные элементы
+-- =========================================================================
+-- AddTab(название, иконка). Иконки: "crosshair", "mouse", "image",
+-- "layers", "gear", "user", "earth" или "rbxassetid://...".
+local RageTab = Win:AddTab("Rage", "crosshair")
+
+-- AddSection(название, "left" | "right") — карточка в левой/правой колонке.
+local Main = RageTab:AddSection("Main", "left")
+
+-- Переключатель: AddToggle(текст, по умолчанию, callback(включён)).
+local AimToggle = Main:AddToggle("Enabled", false, function(v) end)
+-- Подсказка: появится, если навести на функцию и подождать ~1.5 с.
+AimToggle:SetTooltip("Turns the ragebot on")
+
+-- AddSettings() — плашка «...» справа у функции с доп. настройками.
+-- Внутри работают те же AddToggle / AddSlider / AddDropdown / AddColorpicker.
+local AimSettings = AimToggle:AddSettings()
+-- Слайдер: AddSlider(текст, мин, макс, по умолчанию, callback(число), единица).
+AimSettings:AddSlider("Field of View", 0, 360, 180, function(v) end, "°")
+-- Выпадающий список: AddDropdown(текст, варианты, по умолчанию, callback(вариант)).
+AimSettings:AddDropdown("Priority", {"FOV", "Distance", "Health"}, "FOV", function(v) end)
+AimSettings:AddToggle("Show FOV Circle", true, function(v) end)
+
+local SilentToggle = Main:AddToggle("Silent Aim", false, function(v) end)
+SilentToggle:SetTooltip("Aims without moving your camera")
+local SilentSettings = SilentToggle:AddSettings()
+SilentSettings:AddSlider("Hit Chance", 0, 100, 100, function(v) end, " %")
+SilentSettings:AddDropdown("Hitbox", {"Head", "Chest", "Stomach", "Nearest"}, "Head", function(v) end)
+Main:AddToggle("Automatic Fire", false, function(v) end)
+Main:AddToggle("Aim Through Walls", false, function(v) end)
+
+local Selection = RageTab:AddSection("Selection", "left")
+Selection:AddDropdown("Target", {"Highest Damage", "Closest", "Lowest Health"}, "Highest Damage", function(v) end)
+Selection:AddDropdown("Hitboxes", {"Head, Chest, Stomach", "Head Only", "Nearest"}, "Head, Chest, Stomach", function(v) end)
+Selection:AddDropdown("Multipoint", {"Head, Chest, Stomach", "Head Only", "Body"}, "Head, Chest, Stomach", function(v) end)
+Selection:AddSlider("Hit Chance", 0, 100, 50, function(v) end, " %")
+Selection:AddSlider("Min Damage", 0, 100, 15, function(v) end)
+Selection:AddToggle("Quick Stop", true, function(v) end)
+Selection:AddToggle("Quick Scope", true, function(v) end)
+
+local Other = RageTab:AddSection("Other", "right")
+Other:AddDropdown("History", {"Off", "Low", "Medium", "High"}, "High", function(v) end)
+Other:AddToggle("Delay Shot", false, function(v) end)
+-- Плашку «...» можно собрать в одну строку.
+local RecoilToggle = Other:AddToggle("Remove Recoil", false, function(v) end)
+RecoilToggle:AddSettings():AddSlider("Reduction", 0, 100, 100, function(v) end, " %")
+Other:AddToggle("Remove Spread", false, function(v) end)
+Other:AddToggle("Duck Peek Assist", false, function(v) end)
+Other:AddToggle("Quick Peek Assist", false, function(v) end)
+Other:AddToggle("Double Tap", false, function(v) end)
+
+local AntiAim = RageTab:AddSection("Anti-Aim", "right")
+AntiAim:AddToggle("Enabled", false, function(v) end)
+AntiAim:AddDropdown("Pitch", {"Off", "Up", "Down", "Zero"}, "Off", function(v) end)
+AntiAim:AddDropdown("Yaw", {"Off", "Left", "Right", "Backward"}, "Off", function(v) end)
+AntiAim:AddDropdown("Freestanding", {"Off", "On", "Auto"}, "Off", function(v) end)
+AntiAim:AddDropdown("Mouse Override", {"Off", "On"}, "Off", function(v) end)
+
+-- =========================================================================
+-- ВКЛАДКА LEGIT
+-- =========================================================================
+local LegitTab = Win:AddTab("Legit", "mouse")
+local LegitMain = LegitTab:AddSection("Main", "left")
+LegitMain:AddToggle("Enabled", false, function(v) end)
+LegitMain:AddDropdown("Activation", {"Always On", "Hold Key", "Toggle"}, "Always On", function(v) end)
+LegitMain:AddDropdown("Conditions", {"None", "Through Smokes", "Through Walls", "Visible Only"}, "Through Smokes", function(v) end)
+LegitMain:AddDropdown("Hitboxes", {"Head, Chest", "Head Only", "Chest Only", "Nearest"}, "Head, Chest", function(v) end)
+LegitMain:AddSlider("Field of View", 0, 360, 10, function(v) end, "u")
+LegitMain:AddSlider("Smoothing", 0, 100, 100, function(v) end, "%")
+LegitMain:AddSlider("Reaction Time", 0, 500, 0, function(v) end, "ms")
+LegitMain:AddSlider("Min Damage", 0, 100, 15, function(v) end)
+LegitMain:AddToggle("First Bullet Delay", false, function(v) end)
+local LegitRecoil = LegitMain:AddToggle("Recoil Control", false, function(v) end)
+local LegitRecoilSettings = LegitRecoil:AddSettings()
+LegitRecoilSettings:AddSlider("Reduction", 0, 100, 100, function(v) end, "%")
+LegitRecoilSettings:AddSlider("Recovery", 0, 100, 50, function(v) end, "%")
+local LegitQuickScope = LegitMain:AddToggle("Quick Scope", false, function(v) end)
+local LegitQuickScopeSettings = LegitQuickScope:AddSettings()
+LegitQuickScopeSettings:AddSlider("Delay", 0, 500, 100, function(v) end, "ms")
+LegitQuickScopeSettings:AddToggle("Auto Scope", false, function(v) end)
+
+local LegitTrigger = LegitTab:AddSection("Triggerbot", "right")
+LegitTrigger:AddToggle("Enabled", false, function(v) end)
+LegitTrigger:AddDropdown("Conditions", {"None", "Through Smokes", "Through Walls", "Visible Only"}, "Through Smokes", function(v) end)
+LegitTrigger:AddDropdown("Hitboxes", {"Head, Chest, Stomach", "Head Only", "Chest Only", "Nearest"}, "Head, Chest, Stomach", function(v) end)
+LegitTrigger:AddSlider("Hit Chance", 0, 100, 100, function(v) end, "%")
+LegitTrigger:AddSlider("Min Damage", 0, 100, 15, function(v) end)
+LegitTrigger:AddSlider("Reaction Time", 0, 500, 0, function(v) end, "ms")
+LegitTrigger:AddSlider("Burst Time", 0, 500, 50, function(v) end, "ms")
+local TrigQuickScope = LegitTrigger:AddToggle("Quick Scope", false, function(v) end)
+local TrigQuickScopeSettings = TrigQuickScope:AddSettings()
+TrigQuickScopeSettings:AddSlider("Delay", 0, 500, 100, function(v) end, "ms")
+
+local LegitOther = LegitTab:AddSection("Other", "right")
+local LegitVisualize = LegitOther:AddToggle("Visualize", false, function(v) end)
+local LegitVisualizeSettings = LegitVisualize:AddSettings()
+-- Выбор цвета: AddColorpicker(текст, цвет, callback(Color3)).
+LegitVisualizeSettings:AddColorpicker("Color", Color3.fromRGB(26, 123, 255), function(c) end)
+LegitVisualizeSettings:AddSlider("Thickness", 1, 10, 2, function(v) end)
+LegitOther:AddToggle("Automatic Weapons", false, function(v) end)
+LegitOther:AddToggle("Standalone Recoil Control", false, function(v) end)
+LegitOther:AddDropdown("Randomize", {"None", "Low", "Medium", "High"}, "None", function(v) end)
+
+-- =========================================================================
+-- ВКЛАДКА VISUALS — подвкладки и превью игроков
+-- =========================================================================
+Win:AddTabLabel("Common")
+local VisTab = Win:AddTab("Visuals", "image")
+
+-- Подвкладки: AddSubTab(название, иконка). Секции добавляются так же.
+local VisPlayer = VisTab:AddSubTab("Players", "user")
+
+-- Секции противников.
+local PlayerEnemy = VisPlayer:AddSection("Enemy", "left")
+local EspToggle = PlayerEnemy:AddToggle("Enabled", false, function(v) end)
+EspToggle:SetTooltip("Draws ESP on enemies")
+local EspSettings = EspToggle:AddSettings()
+EspSettings:AddSlider("Max Distance", 100, 5000, 1000, function(v) end, " st")
+EspSettings:AddDropdown("Box Style", {"Default", "Corners", "Filled"}, "Default", function(v) end)
+EspSettings:AddToggle("Show Teammates", false, function(v) end)
+-- Переключатель + цвет: AddToggleColorpicker(текст, вкл, цвет, callback(вкл), callback(цвет)).
+PlayerEnemy:AddToggleColorpicker("Offscreen Arrow", false, Color3.fromRGB(255, 255, 255),
+    function(enabled) end, function(c) end)
+PlayerEnemy:AddToggleColorpicker("Sounds", false, Color3.fromRGB(255, 50, 80),
+    function(enabled) end, function(c) end)
+
+local PlayerModel = VisPlayer:AddSection("Enemy Model", "left")
+-- Список + цвет: AddDropdownColorpicker(текст, варианты, цвет, callback(вариант), callback(цвет)).
+PlayerModel:AddDropdownColorpicker("Player",       {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(120, 150, 255), function(o) end, function(c) end)
+PlayerModel:AddDropdownColorpicker("Behind Walls", {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(80, 255, 200),  function(o) end, function(c) end)
+PlayerModel:AddDropdownColorpicker("On Shot",      {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(255, 255, 255), function(o) end, function(c) end)
+PlayerModel:AddDropdownColorpicker("History",      {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(180, 180, 180), function(o) end, function(c) end)
+PlayerModel:AddDropdownColorpicker("Ragdolls",     {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(180, 180, 180), function(o) end, function(c) end)
+-- Цвет + переключатель: AddColorToggle(текст, цвет, вкл, callback(цвет, вкл)).
+PlayerModel:AddColorToggle("Soul Particles", Color3.fromRGB(100, 120, 255), false, function(c, enabled) end)
+PlayerModel:AddColorToggle("Glow",           Color3.fromRGB(255, 255, 255), false, function(c, enabled) end)
+
+-- Секции союзников (видны, когда в превью выбрано Teammates).
+local PlayerTeam = VisPlayer:AddSection("Teammate", "left")
+PlayerTeam:AddToggle("Enabled", false, function(v) end)
+local PlayerTeamModel = VisPlayer:AddSection("Teammate Model", "left")
+PlayerTeamModel:AddDropdownColorpicker("Player",       {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(220, 225, 255), function(o) end, function(c) end)
+PlayerTeamModel:AddDropdownColorpicker("Behind Walls", {"Disabled", "Chams", "Wireframe", "Flat"}, Color3.fromRGB(255, 210, 180), function(o) end, function(c) end)
+PlayerTeamModel:AddToggle("Disable Model Rendering", false, function(v) end)
+PlayerTeamModel:AddColorToggle("Glow", Color3.fromRGB(200, 200, 200), false, function(c, enabled) end)
+local LocalModel = VisPlayer:AddSection("Local Player Model", "left")
+LocalModel:AddDropdown("Model", {"Default", "Chams", "Wireframe"}, "Default", function(v) end)
+LocalModel:AddDropdown("Weapon", {"Default", "Chams", "Wireframe"}, "Default", function(v) end)
+LocalModel:AddSlider("Transparency", 0, 100, 0, function(v) end, "%")
+
+-- Превью игроков в правой колонке (как в Neverlose):
+--   сверху переключатель Enemies / Teammates, кнопка ESP Items и кнопка
+--   «масштабировать ESP вместе»; ниже — твой персонаж.
+--   sections  — какие секции слева показывать для каждой команды.
+--   onItem    — пункт ESP Items включили/выключили.
+--   onTeam    — переключили команду.
+--   onScale   — переключили масштаб ESP.
+local PlayersPreview = VisPlayer:AddESPPreview({
+    team = "Enemies",
+    sections = { Enemies = { PlayerEnemy, PlayerModel }, Teammates = { PlayerTeam, PlayerTeamModel, LocalModel } },
+    onItem = function(team, group, item, on) print("[esp]", team, group, item, on) end,
+})
+-- PlayersPreview:SetTeam("Teammates") / :GetTeam() / :IsItemOn("Enemies", "Main", "Name")
+
+-- Подвкладка World: аккордеоны (раскрывающиеся строки с элементами внутри).
+local VisWorld = VisTab:AddSubTab("World", "earth")
+local WorldView = VisWorld:AddSection("View", "left")
+local ViewOptions = WorldView:AddAccordion("View Options")
+ViewOptions:AddSlider("FOV", 70, 140, 90, function(v) end, "°")
+ViewOptions:AddGroup() -- следующая карточка внутри аккордеона
+ViewOptions:AddToggle("Remove Zoom", false, function(v) end)
+ViewOptions:AddToggle("Remove Blur", false, function(v) end)
+local ScopeOptions = WorldView:AddAccordion("Scope Options")
+ScopeOptions:AddToggle("Remove Scope", false, function(v) end)
+ScopeOptions:AddToggle("Remove Overlay", false, function(v) end)
+ScopeOptions:AddColorpicker("Scope Color", Color3.fromRGB(0, 0, 0), function(c) end)
+local ViewmodelOptions = WorldView:AddAccordion("Viewmodel Options")
+ViewmodelOptions:AddSlider("FOV", 50, 120, 68, function(v) end, "°")
+ViewmodelOptions:AddSlider("Offset X", -10, 10, 0, function(v) end)
+ViewmodelOptions:AddSlider("Offset Y", -10, 10, 0, function(v) end)
+ViewmodelOptions:AddSlider("Offset Z", -10, 10, 0, function(v) end)
+local PerspectiveOptions = WorldView:AddAccordion("Perspective Options")
+PerspectiveOptions:AddToggle("Third Person", false, function(v) end)
+PerspectiveOptions:AddSlider("Distance", 50, 300, 120, function(v) end, " st")
+PerspectiveOptions:AddToggle("Free Cam", false, function(v) end)
+WorldView:AddDropdown("Unlock Spectating", {"Select", "Always", "On Death", "Never"}, "Select", function(v) end)
+WorldView:AddDropdown("Visual Recoil", {"Select", "None", "Reduced", "Default"}, "Select", function(v) end)
+
+local WorldEsp = VisWorld:AddSection("World ESP", "left")
+local BombAcc = WorldEsp:AddAccordion("Bomb")
+BombAcc:AddToggle("Enabled", false, function(v) end)
+BombAcc:AddDropdown("Style", {"Box", "Text", "Icon"}, "Box", function(v) end)
+BombAcc:AddColorpicker("Color", Color3.fromRGB(255, 50, 50), function(c) end)
+BombAcc:AddSlider("Max Distance", 100, 5000, 2000, function(v) end, " st")
+local WeaponsAcc = WorldEsp:AddAccordion("Weapons")
+WeaponsAcc:AddToggle("Enabled", false, function(v) end)
+WeaponsAcc:AddDropdown("Style", {"Box", "Text", "Icon"}, "Text", function(v) end)
+WeaponsAcc:AddColorpicker("Color", Color3.fromRGB(255, 200, 0), function(c) end)
+WeaponsAcc:AddSlider("Max Distance", 100, 5000, 1000, function(v) end, " st")
+local HostagesAcc = WorldEsp:AddAccordion("Hostages")
+HostagesAcc:AddToggle("Enabled", false, function(v) end)
+HostagesAcc:AddColorpicker("Color", Color3.fromRGB(80, 255, 130), function(c) end)
+local GrenadesAcc = WorldEsp:AddAccordion("Grenades")
+GrenadesAcc:AddToggle("Enabled", false, function(v) end)
+GrenadesAcc:AddDropdown("Style", {"Box", "Text", "Icon"}, "Icon", function(v) end)
+GrenadesAcc:AddColorpicker("Color", Color3.fromRGB(255, 130, 50), function(c) end)
+GrenadesAcc:AddSlider("Max Distance", 100, 5000, 1500, function(v) end, " st")
+local GrenadeTraj = WorldEsp:AddToggle("Grenade Trajectory", false, function(v) end)
+local GrenadeTrajSettings = GrenadeTraj:AddSettings()
+GrenadeTrajSettings:AddColorpicker("Color", Color3.fromRGB(255, 255, 255), function(c) end)
+GrenadeTrajSettings:AddSlider("Thickness", 1, 10, 2, function(v) end)
+GrenadeTrajSettings:AddToggle("Show Impact", true, function(v) end)
+WorldEsp:AddToggle("Grenade Proximity Warnings", false, function(v) end)
+
+local WorldHud = VisWorld:AddSection("HUD", "right")
+WorldHud:AddToggle("Radar", false, function(v) end)
+WorldHud:AddToggle("Preserve Killfeed", false, function(v) end)
+WorldHud:AddToggleColorpicker("Inaccuracy Overlay", false, Color3.fromRGB(200, 200, 200),
+    function(enabled) end, function(c) end)
+WorldHud:AddDropdown("Scope Overlay", {"Default", "Classic", "Minimal", "None"}, "Default", function(v) end)
+local ScoreboardAcc = WorldHud:AddAccordion("Scoreboard")
+ScoreboardAcc:AddToggle("Enabled", false, function(v) end)
+ScoreboardAcc:AddToggle("Show Avatars", true, function(v) end)
+ScoreboardAcc:AddColorpicker("Accent", Color3.fromRGB(26, 123, 255), function(c) end)
+local CrosshairsAcc = WorldHud:AddAccordion("Crosshairs")
+CrosshairsAcc:AddToggle("Enabled", false, function(v) end)
+CrosshairsAcc:AddDropdown("Style", {"Cross", "Dot", "Circle", "X"}, "Cross", function(v) end)
+CrosshairsAcc:AddColorpicker("Color", Color3.fromRGB(0, 255, 0), function(c) end)
+CrosshairsAcc:AddSlider("Size", 1, 50, 10, function(v) end, "px")
+CrosshairsAcc:AddSlider("Thickness", 1, 10, 1, function(v) end, "px")
+
+local WorldMisc = VisWorld:AddSection("Miscellaneous", "right")
+local WindowsAcc = WorldMisc:AddAccordion("Windows")
+WindowsAcc:AddToggle("Enabled", false, function(v) end)
+-- Пример: callback может управлять самим меню.
+WindowsAcc:AddSlider("Scale", 50, 150, 100, function(v) Win:SetScale(v / 100) end, "%")
+local RemovalsAcc = WorldMisc:AddAccordion("Removals")
+RemovalsAcc:AddToggle("Remove Fog", false, function(v) end)
+RemovalsAcc:AddToggle("Remove Sun Rays", false, function(v) end)
+RemovalsAcc:AddToggle("Remove Particles", false, function(v) end)
+RemovalsAcc:AddToggle("Remove Decals", false, function(v) end)
+local AmbienceAcc = WorldMisc:AddAccordion("Ambience")
+AmbienceAcc:AddToggle("Enabled", false, function(v) end)
+AmbienceAcc:AddColorpicker("Sky Color", Color3.fromRGB(100, 150, 255), function(c) end)
+AmbienceAcc:AddSlider("Brightness", 0, 100, 50, function(v) end)
+local HitMarkerAcc = WorldMisc:AddAccordion("Hit Marker")
+HitMarkerAcc:AddToggle("Enabled", false, function(v) end)
+HitMarkerAcc:AddColorpicker("Color", Color3.fromRGB(255, 255, 255), function(c) end)
+HitMarkerAcc:AddSlider("Size", 5, 50, 15, function(v) end, "px")
+local BulletTracersAcc = WorldMisc:AddAccordion("Bullet Tracers")
+BulletTracersAcc:AddToggle("Enabled", false, function(v) end)
+BulletTracersAcc:AddColorpicker("Color", Color3.fromRGB(255, 200, 0), function(c) end)
+BulletTracersAcc:AddSlider("Thickness", 1, 10, 2, function(v) end)
+WorldMisc:AddToggleColorpicker("Bullet Impacts", false, Color3.fromRGB(255, 100, 200),
+    function(enabled) end, function(c) end)
+
+-- =========================================================================
+-- ВКЛАДКА INVENTORY — экран снаряжения как в CS2
+-- =========================================================================
+-- AddLoadout занимает всю вкладку: переключатель CT / T, твой персонаж
+-- (крутится мышью), слоты снаряжения и 3 колонки оружия по 5 слотов.
+--   onSelect(team, category, index, name) — клик по слоту.
+--   onTeam(team)                          — смена команды.
+--   icons = { CT = "rbxassetid://...", T = "rbxassetid://..." } — свои эмблемы
+--   (без них — серые кружки).
+local InvTab = Win:AddTab("Inventory", "layers")
+local Loadout = InvTab:AddLoadout({
+    team = "CT",
+    onSelect = function(team, category, index, name)
+        print("[loadout]", team, category, index, name)
+    end,
+    onTeam = function(team) print("[loadout] team", team) end,
+})
+-- Loadout:SetTeam("T") / Loadout:GetTeam()
+
+-- =========================================================================
+-- ВКЛАДКА MISCELLANEOUS
+-- =========================================================================
+local MiscTab = Win:AddTab("Miscellaneous", "gear")
+local MiscMovement = MiscTab:AddSection("Movement", "left")
+MiscMovement:AddToggle("Bunny Hop", false, function(v) end)
+local AirStrafe = MiscMovement:AddToggle("Air Strafe", false, function(v) end)
+local AirStrafeSettings = AirStrafe:AddSettings()
+AirStrafeSettings:AddSlider("Strength", 0, 100, 50, function(v) end, "%")
+AirStrafeSettings:AddToggle("Auto Direction", true, function(v) end)
+local JumpBug = MiscMovement:AddToggle("Jump Bug", false, function(v) end)
+local JumpBugSettings = JumpBug:AddSettings()
+JumpBugSettings:AddSlider("Delay", 0, 200, 50, function(v) end, "ms")
+MiscMovement:AddToggle("No Fall Damage", false, function(v) end)
+MiscMovement:AddToggle("Standalone Quick Stop", false, function(v) end)
+MiscMovement:AddToggle("Strafe Assist", false, function(v) end)
+MiscMovement:AddToggle("Edge Jump", false, function(v) end)
+local SlowWalk = MiscMovement:AddToggle("Slow Walk", false, function(v) end)
+local SlowWalkSettings = SlowWalk:AddSettings()
+SlowWalkSettings:AddSlider("Speed", 0, 100, 30, function(v) end, "%")
+MiscMovement:AddToggle("Fast Ladder", false, function(v) end)
+MiscMovement:AddToggle("Air Duck", false, function(v) end)
+
+local MiscFeatures = MiscTab:AddSection("Features", "right")
+MiscFeatures:AddToggle("Quick Switch", false, function(v) end)
+MiscFeatures:AddToggle("Super Toss", false, function(v) end)
+MiscFeatures:AddToggle("Prevent AFK Kick", false, function(v) end)
+MiscFeatures:AddToggle("Unlock Loadout", false, function(v) end)
+local HitSound = MiscFeatures:AddToggle("Hit Sound", false, function(v) end)
+local HitSoundSettings = HitSound:AddSettings()
+HitSoundSettings:AddDropdown("Sound", {"Default", "Beep", "Click", "Bell"}, "Default", function(v) end)
+HitSoundSettings:AddSlider("Volume", 0, 100, 50, function(v) end, "%")
+local AutoPurchase = MiscFeatures:AddToggle("Automatic Purchase", false, function(v) end)
+local AutoPurchaseSettings = AutoPurchase:AddSettings()
+AutoPurchaseSettings:AddDropdown("Primary", {"Auto", "AK-47", "M4A4", "AWP"}, "Auto", function(v) end)
+AutoPurchaseSettings:AddDropdown("Secondary", {"Auto", "Glock", "USP", "Deagle"}, "Auto", function(v) end)
+local AutoGrenade = MiscFeatures:AddToggle("Automatic Grenade Release", false, function(v) end)
+local AutoGrenadeSettings = AutoGrenade:AddSettings()
+AutoGrenadeSettings:AddSlider("Delay", 0, 500, 100, function(v) end, "ms")
+MiscFeatures:AddToggle("Auto-Accept Matchmaking", false, function(v) end)
+local LogEventsToggle = MiscFeatures:AddToggle("Log Events", false, function(v) end)
+MiscFeatures:AddDropdown("Log Events Filter", {"Select", "All", "Combat", "Movement", "UI"}, "Select", function(v) end)
+
+-- =========================================================================
+-- ВОТЕРМАРКА
+-- =========================================================================
+-- Полоса сверху экрана. Всё это можно поменять и в игре: ПКМ по вотермарке.
+--   positionPreset — "Top Right" / "Top Center" / "Top Left" /
+--                    "Bottom Right" / "Bottom Center" / "Bottom Left"
+--   show           — какие пункты показывать (logo, name, ping, user=аватар,
+--                    speed, time, fps, ram, kd, gpu, cpu, cpufreq, latency,
+--                    loss, issues, server, preset)
+--   order          — порядок пунктов (в игре можно перетаскивать мышью)
+Win:SetWatermark({
+    positionPreset = "Top Right",
+    show = { logo = true, name = true, ping = true, user = true, speed = false, time = false, fps = false, ram = false },
+    order = { "logo", "name", "ping", "user", "speed", "time", "fps", "ram" },
+})
+
+--[[
+    ПОЛЕЗНОЕ (раскомментируй, если нужно)
+
+    -- Значения элементов из кода:
+    AimToggle:Set(true)
+    print(AimToggle:Get())
+
+    -- Бинд из кода (в игре: колесико по функции -> New Hotkey):
+    AimToggle:Bind("F")
+    AimToggle:Unbind()
+
+    -- Клавиша открытия меню:
+    Win:SetMenuBind(Enum.KeyCode.Insert)
+
+    -- Акцентный цвет и прочее оформление:
+    Win:SetCustomization({ accentColor = Color3.fromRGB(255, 90, 110) })
+
+    -- Свой список зрителей (по умолчанию определяется сам):
+    Win:SetSpectators({ "Player1", "Player2" })
+
+    -- Пресеты оружия в шапке (кнопка Global):
+    Win:SetWeaponPresets({ "Global", "Pistols", "Rifles", "Snipers" })
+    Win:OnWeaponPreset(function(name) print("preset", name) end)
+
+    -- Профиль (язык, масштаб, Synchronization и т.п.):
+    Win:OnProfileSetting(function(key, value) print(key, value) end)
+]]
